@@ -49,6 +49,15 @@ class ExperimentStatus(str, Enum):
     TERMINATED = "terminated"
 
 
+class ClosureState(str, Enum):
+    """实验结案状态：终止后再区分补审与更正，避免把迟到回传混进结案口径。"""
+
+    OPEN = "open"              # 收集中，结案前
+    CLOSED = "closed"          # 已结案，快照冻结
+    REAUDIT = "reaudit"        # 补审中，存在结案后迟到回传
+    CORRECTED = "corrected"    # 更正完成，差异已交财务复算
+
+
 class AttributionAlgorithm(str, Enum):
     FIRST_TOUCH = "first_touch"
     LAST_TOUCH = "last_touch"
@@ -410,6 +419,13 @@ class ABExperiment:
     min_sample_size: int = 1000
     start_time: str = ""
     status: ExperimentStatus = ExperimentStatus.DESIGN
+    cutoff_at: str = ""
+    closure_state: ClosureState = ClosureState.OPEN
+    closure_round: int | None = None
+    closure_orders: list[str] = field(default_factory=list)
+    reaudit_orders: list[str] = field(default_factory=list)
+    correction_orders: list[str] = field(default_factory=list)
+    enrollment_round: dict[str, int] = field(default_factory=dict)
 
     def assign_group(self, user_id: str) -> str:
         """基于用户ID哈希的确定性分流。"""
@@ -425,6 +441,78 @@ class ABExperiment:
             if bucket < cumulative:
                 return group
         return list(self.split_ratio.keys())[0]
+
+    def settle_closure(
+        self,
+        closed_at: datetime | str | None = None,
+        order_ids: list[str] | None = None,
+        round_no: int | None = None,
+    ) -> dict[str, Any]:
+        """结案：冻结当次口径并登记进入结案的原订单，迟到回传从此转入补审。"""
+        self.status = ExperimentStatus.ENDED
+        self.closure_state = ClosureState.CLOSED
+        self.closure_round = round_no if round_no is not None else self.closure_round
+        self.closure_orders = list(dict.fromkeys(order_ids or self.closure_orders))
+        return {
+            "experiment_id": self.experiment_id,
+            "status": self.status.value,
+            "closure_state": self.closure_state.value,
+            "closed_at": str(closed_at) if closed_at else None,
+            "cutoff_at": self.cutoff_at,
+            "closure_round": self.closure_round,
+            "closure_orders": list(self.closure_orders),
+        }
+
+    def request_reaudit(self, order_ids: list[str] | None = None) -> dict[str, Any]:
+        """结案后收到迟到回传：原订单转入补审，实验结果暂时标记依据不完整。"""
+        if self.closure_state == ClosureState.OPEN:
+            raise ValueError("实验尚未结案，不能进入补审")
+        new_orders = [
+            order_id for order_id in (order_ids or [])
+            if order_id not in self.closure_orders
+        ]
+        self.reaudit_orders = list(dict.fromkeys([*self.reaudit_orders, *new_orders]))
+        self.closure_state = ClosureState.REAUDIT
+        return {
+            "experiment_id": self.experiment_id,
+            "closure_state": self.closure_state.value,
+            "reaudit_orders": list(self.reaudit_orders),
+            "basis_complete": False,
+        }
+
+    def complete_correction(self, order_ids: list[str] | None = None) -> dict[str, Any]:
+        """差异已交财务复算并处置完：结案状态收敛为已更正。"""
+        if self.closure_state != ClosureState.REAUDIT:
+            raise ValueError("实验不在补审中，没有可更正的差异")
+        new_orders = [
+            order_id for order_id in (order_ids or self.reaudit_orders)
+            if order_id not in self.closure_orders
+        ]
+        self.correction_orders = list(dict.fromkeys([*self.correction_orders, *new_orders]))
+        self.closure_state = ClosureState.CORRECTED
+        return {
+            "experiment_id": self.experiment_id,
+            "closure_state": self.closure_state.value,
+            "correction_orders": list(self.correction_orders),
+            "basis_complete": True,
+        }
+
+    def has_order(self, order_id: str) -> bool:
+        """原订单是否已被本实验的结案或更正口径领用。"""
+        return (
+            order_id in self.closure_orders
+            or order_id in self.reaudit_orders
+            or order_id in self.correction_orders
+        )
+
+    @property
+    def basis_complete(self) -> bool:
+        """结案后的实验结果是否可以直接进日报。
+
+        只有「已结案 / 已更正」两种状态算依据完整；收集中说明还没结案，
+        补审中说明存在未处置的迟到差异，都不能直接出数。
+        """
+        return self.closure_state in (ClosureState.CLOSED, ClosureState.CORRECTED)
 
 
 # ============================================================

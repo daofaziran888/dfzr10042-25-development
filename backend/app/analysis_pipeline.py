@@ -25,6 +25,7 @@ from app.models import (
     AnomalyDetect,
     AttributionAlgorithm,
     AttributionModel,
+    ClosureState,
     CohortAnalysis,
     DashboardDef,
     DataExport,
@@ -268,11 +269,24 @@ def pipeline_experiment_to_compare(
     1. 对每个实验和指标执行统计检验
     2. 生成实验分析报告
     3. 汇总指标对比结论
+
+    结案后仍存在未处置差异（``basis_complete`` 为假）的实验不进入对比结论，
+    而是进入 ``skipped``；这样下游日报不会消费半截数据。
     """
     results = []
     comparison_summary = {}
+    skipped = []
 
     for exp in experiments:
+        if exp.closure_state == ClosureState.REAUDIT:
+            skipped.append({
+                "experiment_id": exp.experiment_id,
+                "experiment_name": exp.experiment_name,
+                "closure_state": exp.closure_state.value,
+                "reason": "实验结案后存在未处置差异，依据不完整",
+                "reaudit_orders": list(exp.reaudit_orders),
+            })
+            continue
         for metric in metrics:
             exp_id = exp.experiment_id
             control = control_data.get(exp_id, [])
@@ -297,6 +311,7 @@ def pipeline_experiment_to_compare(
                 "p_value": analysis.p_value,
                 "significant": analysis.significant,
                 "lift_pct": f"{analysis.lift * 100:.2f}%",
+                "closure_state": exp.closure_state.value,
             }
 
             results.append(analysis)
@@ -304,6 +319,7 @@ def pipeline_experiment_to_compare(
     return {
         "pipeline": "ab_experiment -> experiment_result -> metric_compare",
         "comparisons": comparison_summary,
+        "skipped": skipped,
         "total_reports": len(results),
         "significant_count": sum(1 for r in results if r.significant),
     }

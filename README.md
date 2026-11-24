@@ -11,7 +11,7 @@
 .
 ├── frontend/                 Vue 3 + Vite + TypeScript 前端
 │   ├── src/views/WorkbenchView.vue|tsx  全部模块共享工作台
-│   ├── src/data/modules.ts              18个业务模块配置
+│   ├── src/data/modules.ts              23个业务模块配置
 │   ├── src/api/              统一请求封装
 │   └── vite.config.ts        dev server 配置（open: false）
 ├── backend/                  FastAPI（Python） 后端
@@ -72,6 +72,39 @@ npm run dev
 | 漏斗分析 | `funnel_def` | 漏斗方案 | 方案编号、步骤序列、转化窗口 |
 | 数据集关联 | `dataset_join` | 关联方案 | 方案编号、主数据集、关联数据集 |
 | 报告生成 | `report_builder` | 报告模板 | 模板编号、报告名称、引用指标 |
+| 有效转化批次 | `valid_conversion_batch` | 转化批次 | 批次编号、关联实验、入组人数、有效购买数 |
+
+## 实验结案口径
+
+实验终止即停收结案。停收前已入组的用户，其订单即使在负责人点结案之后才回传，
+也要按「有效转化批次」重算，而不是丢弃或回写已冻结的结案快照：
+
+- **分母** = 该轮次内、停收时点前完成入组的用户（入组时实际归入的轮次为准）；
+- **分子** = 这些用户在轮次内、入组之后、停收之前下单的原订单，每笔只记一次；
+- 停收后才入组的用户（例如 15:00 停收、15:03 才进组）进入下一轮，不进旧实验分母；
+- 结案后回传的迟到转化进入**补审**，差异未处置前日报跳过该轮结果；
+- 补审差异交**财务复算**后单列在日报 `corrections`，与结案口径互斥领用，来回切换不会重复计数；
+- 日报 `complete` 只反映「是否有依据不完整的已结案轮次」；后续轮次尚未结案只列入 `pending_rounds`，不阻断已结案轮次的日报。
+
+核心实现是 `backend/app/experiment_closure.py`（确定性账本）和
+`backend/app/services/valid_conversion_batch.py`（平台编排）。
+指标对比模块从批次取数，日报见前端「结案日报」页面。
+
+### 结案接口
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| POST | `/api/experiment-closure/rounds` | 登记一轮实验的停收时间窗 |
+| POST | `/api/experiment-closure/enrollments` | 登记入组（按实际时点归轮次） |
+| POST | `/api/experiment-closure/conversions` | 登记订单 / 迟到回传（原订单幂等） |
+| POST | `/api/experiment-closure/close` | 结案并冻结快照 |
+| GET | `/api/experiment-closure/daily-report/{实验}` | 只返回依据完整的日报 |
+| POST | `/api/experiment-closure/handoff` | 把未处置差异移交财务 |
+| POST | `/api/experiment-closure/finance-recalc` | 财务复算某笔原订单 |
+| POST | `/api/experiment-closure/transfer` | 在结案侧 / 财务侧间移订单归属 |
+| GET | `/api/experiment-closure/{实验}/claims/{原订单}` | 核对订单当前归属 |
+
+`POST /api/ab_experiment/{id}/actions` 的「终止实验」动作会自动结案账本里已停收的那一轮。
 
 ## 约定
 

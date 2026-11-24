@@ -797,3 +797,7 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
   '最近生成': '报告生成样例3',
   '模板状态': '报告生成样例3'}]
 }
+
+# 有效转化批次由结案账本在运行时生成（见 app/services/valid_conversion_batch.py），
+# 这里只保留一个空表，保证列表接口在没有任何实验结案时也能正常返回。
+SEED_ROWS.setdefault("valid_conversion_batch", [])
